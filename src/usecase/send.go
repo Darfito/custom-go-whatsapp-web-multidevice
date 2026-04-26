@@ -97,27 +97,6 @@ func (service serviceSend) SendText(ctx context.Context, request domainSend.Mess
 		return response, err
 	}
 
-	// Create base message
-	msg := &waE2E.Message{
-		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
-			Text:        proto.String(request.Message),
-			ContextInfo: &waE2E.ContextInfo{},
-		},
-	}
-
-	// Add forwarding context if IsForwarded is true
-	if request.BaseRequest.IsForwarded {
-		msg.ExtendedTextMessage.ContextInfo.IsForwarded = proto.Bool(true)
-		msg.ExtendedTextMessage.ContextInfo.ForwardingScore = proto.Uint32(100)
-	}
-
-	// Set disappearing message duration if provided
-	if request.BaseRequest.Duration != nil && *request.BaseRequest.Duration > 0 {
-		msg.ExtendedTextMessage.ContextInfo.Expiration = proto.Uint32(uint32(*request.BaseRequest.Duration))
-	} else {
-		msg.ExtendedTextMessage.ContextInfo.Expiration = proto.Uint32(service.getDefaultEphemeralExpiration(request.BaseRequest.Phone))
-	}
-
 	// Get mentions from text (existing behavior - parses @phone from message text)
 	parsedMentions := service.getMentionFromText(ctx, request.Message)
 
@@ -125,12 +104,43 @@ func (service serviceSend) SendText(ctx context.Context, request domainSend.Mess
 	if len(request.Mentions) > 0 {
 		explicitMentions := service.getMentionsFromList(ctx, request.Mentions, dataWaRecipient)
 		parsedMentions = append(parsedMentions, explicitMentions...)
-		// Deduplicate to avoid mentioning the same person twice
 		parsedMentions = utils.UniqueStrings(parsedMentions)
 	}
 
-	if len(parsedMentions) > 0 {
-		msg.ExtendedTextMessage.ContextInfo.MentionedJID = parsedMentions
+	isPlain := (request.ReplyMessageID == nil || *request.ReplyMessageID == "") &&
+		!request.BaseRequest.IsForwarded &&
+		(request.BaseRequest.Duration == nil || *request.BaseRequest.Duration == 0) &&
+		len(parsedMentions) == 0
+
+	var msg *waE2E.Message
+
+	if isPlain {
+		// Use Conversation for plain text — matches official WA client behavior
+		msg = &waE2E.Message{
+			Conversation: proto.String(request.Message),
+		}
+	} else {
+		msg = &waE2E.Message{
+			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+				Text:        proto.String(request.Message),
+				ContextInfo: &waE2E.ContextInfo{},
+			},
+		}
+
+		if request.BaseRequest.IsForwarded {
+			msg.ExtendedTextMessage.ContextInfo.IsForwarded = proto.Bool(true)
+			msg.ExtendedTextMessage.ContextInfo.ForwardingScore = proto.Uint32(100)
+		}
+
+		if request.BaseRequest.Duration != nil && *request.BaseRequest.Duration > 0 {
+			msg.ExtendedTextMessage.ContextInfo.Expiration = proto.Uint32(uint32(*request.BaseRequest.Duration))
+		} else {
+			msg.ExtendedTextMessage.ContextInfo.Expiration = proto.Uint32(service.getDefaultEphemeralExpiration(request.BaseRequest.Phone))
+		}
+
+		if len(parsedMentions) > 0 {
+			msg.ExtendedTextMessage.ContextInfo.MentionedJID = parsedMentions
+		}
 	}
 
 	// Reply message
